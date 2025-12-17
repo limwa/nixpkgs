@@ -12,8 +12,7 @@
 
 let
   # Coerces a string to an int.
-  coerceString = val: if lib.isInt val then toString val else val;
-  coerceMajorVersionToInt = val:  lib.toIntBase10 (lib.versions.major (coerceString val));
+  coerceMajorVersionToInt = val:  lib.toIntBase10 (lib.versions.major (toString val));
 
   # Parses a single version, substituting "latest" with the latest version.
   parseVersion =
@@ -103,12 +102,12 @@ in
         # to "36" instead of "36.1".
         minPlatformVersionInt = coerceMajorVersionToInt (
           parseVersion repo "platforms" (
-            coerceString minPlatformVersion
+            toString minPlatformVersion
           )
         );
         maxPlatformVersionInt = coerceMajorVersionToInt (
           parseVersion repo "platforms" (
-            coerceString maxPlatformVersion
+            toString maxPlatformVersion
           )
         );
       in
@@ -126,7 +125,7 @@ in
             # to "36" instead of "36.1".
             coerceMajorVersionToInt (
               parseVersion repo "platforms" (
-                coerceString minPlatformVersion
+                toString minPlatformVersion
               )
             );
         latestPlatformVersionInt = lib.max minPlatformVersionInt (coerceMajorVersionToInt repo.latest.platforms);
@@ -161,7 +160,7 @@ in
 
 let
   # Resolve all the platform versions.
-  platformVersions' = parseVersions repo "platforms" (map coerceString platformVersions);
+  platformVersions' = parseVersions repo "platforms" (map toString platformVersions);
 
   # Determine the Android os identifier from Nix's system identifier
   os =
