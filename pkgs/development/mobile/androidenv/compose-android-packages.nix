@@ -12,9 +12,8 @@
 
 let
   # Coerces a string to an int.
-  coerceInt = val: if lib.isInt val then val else lib.toIntBase10 val;
-
-  coerceIntVersion = v: coerceInt (lib.versions.major (toString v));
+  coerceString = val: if lib.isInt val then toString val else val;
+  coerceMajorVersionToInt = val:  lib.toIntBase10 (lib.versions.major (coerceString val));
 
   # Parses a single version, substituting "latest" with the latest version.
   parseVersion =
@@ -99,8 +98,19 @@ in
   platformVersions ?
     if minPlatformVersion != null && maxPlatformVersion != null then
       let
-        minPlatformVersionInt = coerceIntVersion (parseVersion repo "platforms" minPlatformVersion);
-        maxPlatformVersionInt = coerceIntVersion (parseVersion repo "platforms" maxPlatformVersion);
+        # Only selecting the major is a workaround for the lack of order in platform versions.
+        # Because `lib.range` requires two integers, we need to map `minPlatformVersion = "36.1"`
+        # to "36" instead of "36.1".
+        minPlatformVersionInt = coerceMajorVersionToInt (
+          parseVersion repo "platforms" (
+            coerceString minPlatformVersion
+          )
+        );
+        maxPlatformVersionInt = coerceMajorVersionToInt (
+          parseVersion repo "platforms" (
+            coerceString maxPlatformVersion
+          )
+        );
       in
       lib.range (lib.min minPlatformVersionInt maxPlatformVersionInt) (
         lib.max minPlatformVersionInt maxPlatformVersionInt
@@ -111,8 +121,15 @@ in
           if minPlatformVersion == null then
             1
           else
-            coerceIntVersion (parseVersion repo "platforms" minPlatformVersion);
-        latestPlatformVersionInt = lib.max minPlatformVersionInt (coerceIntVersion repo.latest.platforms);
+            # Only selecting the major is a workaround for the lack of order in platform versions.
+            # Because `lib.range` requires two integers, we need to map `minPlatformVersion = "36.1"`
+            # to "36" instead of "36.1".
+            coerceMajorVersionToInt (
+              parseVersion repo "platforms" (
+                coerceString minPlatformVersion
+              )
+            );
+        latestPlatformVersionInt = lib.max minPlatformVersionInt (coerceMajorVersionToInt repo.latest.platforms);
         firstPlatformVersionInt = lib.max minPlatformVersionInt (
           latestPlatformVersionInt - (lib.max 1 numLatestPlatformVersions) + 1
         );
@@ -144,7 +161,7 @@ in
 
 let
   # Resolve all the platform versions.
-  platformVersions' = map coerceIntVersion (parseVersions repo "platforms" platformVersions);
+  platformVersions' = parseVersions repo "platforms" (map coerceString platformVersions);
 
   # Determine the Android os identifier from Nix's system identifier
   os =
