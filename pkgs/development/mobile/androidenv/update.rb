@@ -11,6 +11,109 @@ require 'stringio'
 require 'slop'
 require 'curb'
 require 'nokogiri'
+# 
+# "archives": [
+#   {
+#     "arch": "all",
+#     "os": "windows",
+#     "sha1": "fc165c721b8d2da55e6fede467526c81f562be7b",
+#     "size": 54254759,
+#     "url": "https://dl.google.com/android/repository/91936d4ee3ccc839f0addd53c9ebf087b1e39251.build-tools_r30.0.3-windows.zip"
+#   },
+#   {
+#     "arch": "all",
+#     "os": "linux",
+#     "sha1": "2076ea81b5a2fc298ef7bf85d666f496b928c7f1",
+#     "size": 53134793,
+#     "url": "https://dl.google.com/android/repository/build-tools_r30.0.3-linux.zip"
+#   },
+#   {
+#     "arch": "all",
+#     "os": "macosx",
+#     "sha1": "0807cd3f0dbc33c8be7f3d6faa263f6b14b502b7",
+#     "size": 51698282,
+#     "url": "https://dl.google.com/android/repository/f6d24b187cc6bd534c6c37604205171784ac5621.build-tools_r30.0.3-macosx.zip"
+#   }
+# ],
+# "channel": "stable",
+# "kind": "generic",
+# "license": "android-sdk-license#aaf80cd0aee7e569",
+# "path": "build-tools;30.0.3",
+# "revision": "30.0.3"*/
+
+class Archive
+  attr_reader :arch, :os, :sha1, :size, :url
+  
+  # @param arch [String]
+  def initialize(arch)
+  end
+end
+
+a = Archive.new(
+  arch: 'all',
+  os: 'windows'
+)
+
+class Package
+  attr_reader :archives, :channel, :kind, :license, :path, :revision
+
+  def initialize(params = {})
+    # @type [Array<Archive>]
+    @archives = []
+    # @type [String]
+    @channel = params[:channel] || (raise 'channel is required')
+    # @type [String]
+    @kind = params[:kind] || (raise 'kind is required')
+    # @type [String]
+    @license = params[:license] || (raise 'license is required')
+    # @type
+    @path = params[:path] || (raise 'path is required')
+    @revision = params[:revision] || (raise 'revision is required')
+    
+    
+    
+    
+  end
+end
+
+class PackageCollection
+  attr_reader :revisions
+
+  def initialize
+    @revisions = {}
+  end
+end
+
+class Repository
+  attr_reader :packages, :expirations, :licenses
+
+  def initialize
+    @packages = {}
+    @expirations = {}
+    @licenses = {}
+  end
+
+  # @param path [String]
+  # @return [PackageCollection, nil]
+  def get_package_collection path
+    @packages[path]
+  end
+  
+  # @param package [Package]
+  def add_package package
+    path = package.p
+  end
+  
+  def filter_packages
+    raise "No block given to filter_packages" unless block_given?
+    @packages.filter yield
+  end
+end
+
+r = Repository.new
+
+r.filter_packages do |a, b|
+end
 
 # Returns a repo URL for a given package name.
 def repo_url value
@@ -67,146 +170,121 @@ def get location
   end
 end
 
-# Returns a JSON with the data and structure of the input XML
-def to_json_collector doc
-  json = {}
-  index = 0
-  doc.element_children.each { |node|
-    if node.children.length == 1 and node.children.first.text?
-      json["#{node.name}:#{index}"] ||= node.content
-      index += 1
-      next
-    end
-    json["#{node.name}:#{index}"] ||= to_json_collector node
-    index += 1
-  }
-  element_attributes = {}
-  doc.attribute_nodes.each do |attr|
-    if attr.name == "type"
-      type = attr.value.split(':', 2).last
-      case attr.value
-      when 'generic:genericDetailsType'
-        element_attributes["xsi:type"] ||= "ns5:#{type}"
-      when 'addon:extraDetailsType'
-        element_attributes["xsi:type"] ||= "ns8:#{type}"
-      when 'addon:mavenType'
-        element_attributes["xsi:type"] ||= "ns8:#{type}"
-      when 'sdk:platformDetailsType'
-        element_attributes["xsi:type"] ||= "ns11:#{type}"
-      when 'sdk:sourceDetailsType'
-        element_attributes["xsi:type"] ||= "ns11:#{type}"
-      when 'sys-img:sysImgDetailsType'
-        element_attributes["xsi:type"] ||= "ns12:#{type}"
-      when 'addon:addonDetailsType' then
-        element_attributes["xsi:type"] ||= "ns8:#{type}"
-      end
-    else
-      element_attributes[attr.name] ||= attr.value
-    end
-  end
-  if !element_attributes.empty?
-    json['element-attributes'] ||= element_attributes
-  end
-  json
+def make_key elements
+  elements.join('#')
 end
 
-# Returns a tuple of [type, revision, revision components] for a package node.
-def package_revision package
+def decode_key key
+  key.split('#')
+end
+
+def revision_to_s revision_element
+  return nil unless revision_element
+  
+  major = text revision_element.at_css('> major')
+  minor = text revision_element.at_css('> minor')
+  micro = text revision_element.at_css('> micro')
+  preview = text revision_element.at_css('> preview')
+
+  # Converting the revision to a string must obey a few
+  # rules to ensure that sorting the resulting string
+  # is consistent with the expected ordering of the revisions
+  # in the repository.
+
+  revision = major
+  # Minor and micro are assumed to be 0 if not present.
+  # This would be a problem if, for instance,
+  # the revision "20" is considered newer than "20.0",
+  # which doesn't seem to be the case.
+  revision << ".#{minor || '0'}"
+  revision << ".#{micro || '0'}"
+  # The preview number is optionally included in the revision
+  # because "20.0" is considered newer than "20.0-preview01",
+  # for instance.
+  revision << "-preview#{preview}" unless empty?(preview)
+
+  revision
+end
+
+def package_details package
   type_details = package.at_css('> type-details')
   type = type_details.attributes['type']
   type &&= type.value
+  return nil if type.nil?
 
-  revision = nil
-  components = nil
-
-  case type
-  when 'generic:genericDetailsType', 'addon:extraDetailsType', 'addon:mavenType'
-    major = text package.at_css('> revision > major')
-    minor = text package.at_css('> revision > minor')
-    micro = text package.at_css('> revision > micro')
-    preview = text package.at_css('> revision > preview')
-
-    revision = ''
-    components = []
-    unless empty?(major)
-      revision << major
-      components << major
-    end
-
-    unless empty?(minor)
-      revision << ".#{minor}"
-      components << minor
-    end
-
-    unless empty?(micro)
-      revision << ".#{micro}"
-      components << micro
-    end
-
-    unless empty?(preview)
-      revision << "-rc#{preview}"
-      components << preview
-    end
-  when 'sdk:platformDetailsType'
-    codename = text type_details.at_css('> codename')
-    api_level = text type_details.at_css('> api-level')
-    revision = empty?(codename) ? api_level : codename
-    components = [revision]
-  when 'sdk:sourceDetailsType'
-    api_level = text type_details.at_css('> api-level')
-    revision, components = api_level, [api_level]
-  when 'sys-img:sysImgDetailsType'
-    codename = text type_details.at_css('> codename')
-    api_level = text type_details.at_css('> api-level')
-    id = text type_details.at_css('> tag > id')
-    abi = text type_details.at_css('> abi')
-
-    revision = ''
-    components = []
-    if empty?(codename)
-      revision << api_level
-      components << api_level
+  kind = case type
+    when 'generic:genericDetailsType'
+      'generic'
+    when 'addon:extraDetailsType'
+      'extra'
+    when 'addon:addonDetailsType'
+      'addon'
+    when 'sdk:platformDetailsType'
+      'platform'
+    when 'sdk:sourceDetailsType'
+      'source'
+    when 'sys-img:sysImgDetailsType'
+      'system-image'
     else
-      revision << codename
-      components << codename
-    end
-
-    unless empty?(id)
-      revision << "-#{id}"
-      components << id
-    end
-
-    unless empty?(abi)
-      revision << "-#{abi}"
-      components << abi
-    end
-  when 'addon:addonDetailsType' then
-    api_level = text type_details.at_css('> api-level')
-    id = text type_details.at_css('> tag > id')
-    revision = api_level
-    components = [api_level, id]
+      raise "Unknown package type: #{type}"
   end
 
-  [type, revision, components]
+  api_level = text type_details.at_css('> api-level')
+  abi = text type_details.at_css('> abi')
+  extension_level = text type_details.at_css('> extension-level')
+
+  base_extension = text type_details.at_css('> base-extension')
+  base_extension &&= base_extension == 'true'
+
+  layoutlib = type_details.at_css('> layoutlib')
+  layoutlib &&= layoutlib.attributes
+
+  details = {}
+  details['api_level'] = api_level if api_level
+  details['base_extension'] = base_extension if base_extension
+  details['extension_level'] = extension_level if extension_level
+  details['layoutlib'] = layoutlib if layoutlib
+  details['abi'] = abi if abi
+  
+  [kind, details]
 end
 
 # Returns a hash of archives for the specified package node.
 def package_archives package
-  archives = {}
+  archives = []
   package.css('> archives > archive').each do |archive|
     host_os = text archive.at_css('> host-os')
     host_arch = text archive.at_css('> host-arch')
     host_os = 'all' if empty?(host_os)
     host_arch = 'all' if empty?(host_arch)
-    archives[host_os + host_arch] = {
+    archives += [{
       'os' => host_os,
       'arch' => host_arch,
       'size' => Integer(text(archive.at_css('> complete > size'))),
       'sha1' => text(archive.at_css('> complete > checksum')),
       'url' => yield(text(archive.at_css('> complete > url')))
-    }
+    }]
   end
   archives
+end
+
+def package_dependencies package
+  dependencies = []
+  package.css('> dependencies > dependency').each do |dependency|
+    result = {}
+
+    path = dependency.attributes['path']
+    path &&= path.value
+
+    min_revision = revision_to_s dependency.at_css('> min-revision')
+
+    result['path'] = path
+    result['min-revision'] = min_revision if min_revision
+
+    dependencies << result
+  end
+
+  dependencies
 end
 
 # Returns the text from a node, or nil.
@@ -217,23 +295,6 @@ end
 # Nil or empty helper.
 def empty? value
   !value || value.empty?
-end
-
-# Fixes up returned hashes by converting archives like
-#  (e.g. {'linux' => {'sha1' => ...}, 'macosx' => ...} to
-# [{'os' => 'linux', 'sha1' => ...}, {'os' => 'macosx', ...}, ...].
-def fixup value
-  Hash[value.map do |k, v|
-    if k == 'archives' && v.is_a?(Hash)
-      [k, v.map do |os, archive|
-        fixup(archive)
-      end]
-    elsif v.is_a?(Hash)
-      [k, fixup(v)]
-    else
-      [k, v]
-    end
-  end]
 end
 
 # Today since Unix Epoch, January 1, 1970.
@@ -249,11 +310,6 @@ def expire_records record, oldest_valid_day
       return nil
     end
     update = {}
-    # This should only happen in the first run of this scrip after adding the `expire_record` function.
-    if record.has_key?('displayName') &&
-      !record.has_key?('last-available-day')
-      update['last-available-day'] = today
-    end
     record.each {|key, value|
       v = expire_records value, oldest_valid_day
       update[key] = v if v
@@ -277,169 +333,71 @@ end
 # Gets all license texts, deduplicating them.
 def get_licenses doc
   licenses = {}
+  key_lookup = {}
   doc.css('license[type="text"]').each do |license_node|
     license_id = license_node['id']
-    if license_id
-      licenses[license_id] ||= []
-      licenses[license_id] |= [normalize_license(text(license_node))]
-    end
+    license_text = normalize_license(text(license_node))
+    license_hash = Digest::SHA256.hexdigest(license_text)[0...16]
+
+    target = (licenses[license_id] ||= {})
+    target['revisions'] ||= {}
+    target['revisions'][license_hash] = license_text
+
+    key_lookup[license_id] = make_key [license_id, license_hash]
   end
-  licenses
+  [licenses, key_lookup]
 end
 
-def parse_package_xml doc
-  licenses = get_licenses doc
+def get_channels doc
+  channels = {}
+  doc.css('channel').each do |channel_node|
+    channel_id = channel_node['id']
+    channels[channel_id] = text(channel_node) if channel_id
+  end
+  channels
+end
+
+def parse_repository_xml doc
+  licenses, license_key_lookup = get_licenses doc
+  channels = get_channels doc
   packages = {}
-  # check https://github.com/NixOS/nixpkgs/issues/373785
-  extras = {}
+  expirations = {}
 
   doc.css('remotePackage').each do |package|
-    name, _, version = package['path'].partition(';')
-    next if version == 'latest'
-
-    is_extras = name == 'extras'
-    if is_extras
-      name = package['path'].tr(';', '-')
-    end
-
-    type, revision, _ = package_revision(package)
-    next unless revision
-
-    path = package['path'].tr(';', '/')
-    display_name = text package.at_css('> display-name')
     uses_license = package.at_css('> uses-license')
     uses_license &&= uses_license['ref']
-    obsolete ||= package['obsolete']
-    type_details = to_json_collector package.at_css('> type-details')
-    revision_details = to_json_collector package.at_css('> revision')
-    archives = package_archives(package) {|url| repo_url url}
-    dependencies_xml = package.at_css('> dependencies')
-    dependencies = to_json_collector dependencies_xml if dependencies_xml
 
-    if is_extras
-      target = extras
-      component = package['path']
-      target = (target[component] ||= {})
-    else
-      target = (packages[name] ||= {})
-      target = (target[revision] ||= {})
-    end
+    channel_ref = package.at_css('> channelRef')
+    channel_ref &&= channel_ref['ref']
+    channel_ref &&= channels[channel_ref]
 
-    target['name'] ||= name
-    target['path'] ||= path
-    target['revision'] ||= revision
-    target['displayName'] ||= display_name
-    target['license'] ||= uses_license if uses_license
-    target['obsolete'] ||= obsolete if obsolete == 'true'
-    target['type-details'] ||= type_details
-    target['revision-details'] ||= revision_details
-    target['dependencies'] ||= dependencies if dependencies
-    target['archives'] ||= {}
-    merge target['archives'], archives
-    target['last-available-day'] = today
+    obsolete = package['obsolete']
+
+    revision = revision_to_s package.at_css('> revision')
+    kind, details = package_details(package)
+    archives = package_archives(package) { |url| repo_url url }
+    dependencies = package_dependencies package
+
+    # @type [String]
+    path = package['path']
+
+    target = (packages[path] ||= {})
+    target['revisions'] ||= {}
+    target_revision = (target['revisions'][revision] = {})
+
+    target_revision['kind'] = kind
+    target_revision['path'] = path
+    target_revision['revision'] = revision
+    target_revision['channel'] = channel_ref
+    target_revision['license'] = license_key_lookup[uses_license] if uses_license
+    target_revision['obsolete'] = true if obsolete == 'true'
+    target_revision['details'] = details unless details.empty?
+    target_revision['dependencies'] = dependencies unless dependencies.empty?
+    target_revision['archives'] = archives
+    target_revision['last-available-day'] = today
   end
 
-  [licenses, packages, extras]
-end
-
-def parse_image_xml doc
-  licenses = get_licenses doc
-  images = {}
-
-  doc.css('remotePackage[path^="system-images;"]').each do |package|
-    type, revision, components = package_revision(package)
-    next unless revision
-
-    path = package['path'].tr(';', '/')
-    display_name = text package.at_css('> display-name')
-    uses_license = package.at_css('> uses-license')
-    uses_license &&= uses_license['ref']
-    obsolete &&= package['obsolete']
-    type_details = to_json_collector package.at_css('> type-details')
-    revision_details = to_json_collector package.at_css('> revision')
-    archives = package_archives(package) {|url| image_url url, components[-2]}
-    dependencies_xml = package.at_css('> dependencies')
-    dependencies = to_json_collector dependencies_xml if dependencies_xml
-
-    target = images
-    components.each do |component|
-      target[component] ||= {}
-      target = target[component]
-    end
-
-    target['name'] ||= "system-image-#{revision}"
-    target['path'] ||= path
-    target['revision'] ||= revision
-    target['displayName'] ||= display_name
-    target['license'] ||= uses_license if uses_license
-    target['obsolete'] ||= obsolete if obsolete
-    target['type-details'] ||= type_details
-    target['revision-details'] ||= revision_details
-    target['dependencies'] ||= dependencies if dependencies
-    target['archives'] ||= {}
-    merge target['archives'], archives
-    target['last-available-day'] = today
-  end
-
-  [licenses, images]
-end
-
-def parse_addon_xml doc
-  licenses = get_licenses doc
-  addons, extras = {}, {}
-
-  doc.css('remotePackage').each do |package|
-    type, revision, components = package_revision(package)
-    next unless revision
-
-    path = package['path'].tr(';', '/')
-    display_name = text package.at_css('> display-name')
-    uses_license = package.at_css('> uses-license')
-    uses_license &&= uses_license['ref']
-    obsolete &&= package['obsolete']
-    type_details = to_json_collector package.at_css('> type-details')
-    revision_details = to_json_collector package.at_css('> revision')
-    archives = package_archives(package) {|url| repo_url url}
-    dependencies_xml = package.at_css('> dependencies')
-    dependencies = to_json_collector dependencies_xml if dependencies_xml
-
-    case type
-    when 'addon:addonDetailsType'
-      name = components.last
-      target = addons
-
-      # Hack for Google APIs 25 r1, which displays as 23 for some reason
-      archive_name = text package.at_css('> archives > archive > complete > url')
-      if archive_name == 'google_apis-25_r1.zip'
-        path = 'add-ons/addon-google_apis-google-25'
-        revision = '25'
-        components = [revision, components.last]
-      end
-    when 'addon:extraDetailsType', 'addon:mavenType'
-      name = package['path'].tr(';', '-')
-      components = [package['path']]
-      target = extras
-    end
-
-    components.each do |component|
-      target = (target[component] ||= {})
-    end
-
-    target['name'] ||= name
-    target['path'] ||= path
-    target['revision'] ||= revision
-    target['displayName'] ||= display_name
-    target['license'] ||= uses_license if uses_license
-    target['obsolete'] ||= obsolete if obsolete
-    target['type-details'] ||= type_details
-    target['revision-details'] ||= revision_details
-    target['dependencies'] ||= dependencies if dependencies
-    target['archives'] ||= {}
-    merge target['archives'], archives
-    target['last-available-day'] = today
-  end
-
-  [licenses, addons, extras]
+  [licenses, packages, expirations]
 end
 
 # Make the clean diff by always sorting the result before puting it in the stdout.
@@ -473,8 +431,9 @@ def merge dest, src
 end
 
 opts = Slop.parse do |o|
-  o.array '-p', '--packages', 'packages repo XMLs to parse', default: %w[repo://repository#2-3]
-  o.array '-i', '--images', 'system image repo XMLs to parse', default: %w[
+  o.array '-r', '--repositories', 'packages repo XMLs to parse', default: %w[
+    repo://repository#2-3
+    repo://addon#2-3
     image://android#2-3
     image://android-tv#2-3
     image://android-wear#2-3
@@ -483,58 +442,24 @@ opts = Slop.parse do |o|
     image://google_apis#2-3
     image://google_apis_playstore#2-3
   ]
-  o.array '-a', '--addons', 'addon repo XMLs to parse', default: %w[repo://addon#2-3]
   o.string '-I', '--input', 'input JSON file for repo', default: File.join(__dir__, 'repo.json')
   o.string '-O', '--output', 'output JSON file for repo', default: File.join(__dir__, 'repo.json')
 end
 
-result = {}
-result['licenses'] = {}
-result['packages'] = {}
-result['images'] = {}
-result['addons'] = {}
-result['extras'] = {}
+result = {
+  'packages' => {},
+  'expirations' => {},
+  'licenses' => {},
+}
 
-opts[:packages].each do |filename|
-  licenses, packages, extras = parse_package_xml(Nokogiri::XML(get(filename)) { |conf| conf.noblanks })
-  merge result['licenses'], licenses
+opts[:repositories].each do |filename|
+  licenses, packages, expirations = parse_repository_xml(Nokogiri::XML(get(filename)) { |conf| conf.noblanks })
   merge result['packages'], packages
-  merge result['extras'], extras
-end
-
-opts[:images].each do |filename|
-  licenses, images = parse_image_xml(Nokogiri::XML(get(filename)) { |conf| conf.noblanks })
+  merge result['expirations'], expirations
   merge result['licenses'], licenses
-  merge result['images'], images
 end
-
-opts[:addons].each do |filename|
-  licenses, addons, extras = parse_addon_xml(Nokogiri::XML(get(filename)) { |conf| conf.noblanks })
-  merge result['licenses'], licenses
-  merge result['addons'], addons
-  merge result['extras'], extras
-end
-
-result['latest'] = {}
-result['packages'].each do |name, versions|
-  max_version = Gem::Version.new('0')
-  versions.each do |version, package|
-    if package['license'] == 'android-sdk-license' && Gem::Version.correct?(package['revision'])
-      package_version = Gem::Version.new(package['revision'])
-      max_version = package_version if package_version > max_version
-    end
-  end
-  result['latest'][name] = max_version.to_s
-end
-
-# As we keep the old packages in the repo JSON file, we should have
-# a strategy to remove them at some point!
-# So with this variable we claim it's okay to remove them from the
-# JSON after two years that they are not available.
-two_years_ago = today - 2 * 365
 
 input = {}
-prev_latest = {}
 begin
   input_json = if File.exist?(opts[:input])
                  STDERR.puts "Reading #{opts[:input]}"
@@ -543,29 +468,34 @@ begin
                  STDERR.puts "Creating new repo"
                  "{}"
                end
-
-  if input_json != nil && !input_json.empty?
-    input = expire_records(JSON.parse(input_json), two_years_ago)
-
-    # Just create a new set of latest packages.
-    prev_latest = input['latest'] || {}
-    input['latest'] = {}
-  end
+  input = JSON.parse(input_json)
 rescue JSON::ParserError => e
   STDERR.write(e.message)
   return
 end
 
-fixup_result = fixup(result)
-
 # Regular installation of Android SDK would keep the previously installed packages even if they are not
 # in the uptodate XML files, so here we try to support this logic by keeping un-available packages,
 # therefore the old packages will work as long as the links are working on the Google servers.
-output = sort_recursively(merge(input, fixup_result))
+merged_result = merge(input, result)
+
+# Over time, as new revisions and packages are added, we want to
+# prune old revisions and packages so that the repo.json file
+# doesn't grow indefinitely.
+# So with this variable we claim it's okay to remove them from the
+# JSON after two years that they are not available.
+two_years_ago = today - 2 * 365
+
+expired_result = merged_result
+
+
+output = sort_recursively(expired_result)
+
+
 
 # Fingerprint the latest versions.
-fingerprint = Digest::SHA256.hexdigest(output['latest'].tap {_1.delete 'fingerprint'}.to_json)[0...16]
-output['latest']['fingerprint'] = fingerprint
+# fingerprint = Digest::SHA256.hexdigest(output['latest'].tap {_1.delete 'fingerprint'}.to_json)[0...16]
+# output['latest']['fingerprint'] = fingerprint
 
 # Write the repository. Append a \n to keep nixpkgs Github Actions happy.
 STDERR.puts "Writing #{opts[:output]}"

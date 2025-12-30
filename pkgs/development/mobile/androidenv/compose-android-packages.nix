@@ -12,7 +12,7 @@
 
 let
   # Coerces a string to an int.
-  coerceMajorVersionToInt = val:  lib.toIntBase10 (lib.versions.major (toString val));
+  coerceMajorVersionToInt = val: lib.toIntBase10 (lib.versions.major (toString val));
 
   # Parses a single version, substituting "latest" with the latest version.
   parseVersion =
@@ -101,14 +101,10 @@ in
         # Because `lib.range` requires two integers, we need to map `minPlatformVersion = "36.1"`
         # to "36" instead of "36.1".
         minPlatformVersionInt = coerceMajorVersionToInt (
-          parseVersion repo "platforms" (
-            toString minPlatformVersion
-          )
+          parseVersion repo "platforms" (toString minPlatformVersion)
         );
         maxPlatformVersionInt = coerceMajorVersionToInt (
-          parseVersion repo "platforms" (
-            toString maxPlatformVersion
-          )
+          parseVersion repo "platforms" (toString maxPlatformVersion)
         );
       in
       lib.range (lib.min minPlatformVersionInt maxPlatformVersionInt) (
@@ -123,12 +119,10 @@ in
             # Only selecting the major is a workaround for the lack of order in platform versions.
             # Because `lib.range` requires two integers, we need to map `minPlatformVersion = "36.1"`
             # to "36" instead of "36.1".
-            coerceMajorVersionToInt (
-              parseVersion repo "platforms" (
-                toString minPlatformVersion
-              )
-            );
-        latestPlatformVersionInt = lib.max minPlatformVersionInt (coerceMajorVersionToInt repo.latest.platforms);
+            coerceMajorVersionToInt (parseVersion repo "platforms" (toString minPlatformVersion));
+        latestPlatformVersionInt = lib.max minPlatformVersionInt (
+          coerceMajorVersionToInt repo.latest.platforms
+        );
         firstPlatformVersionInt = lib.max minPlatformVersionInt (
           latestPlatformVersionInt - (lib.max 1 numLatestPlatformVersions) + 1
         );
@@ -243,20 +237,33 @@ let
       # into the latest API level for each major version.
       mkLatestByApiLevel =
         packages:
+        extractApiLevel:
         lib.filterAttrs (_: value: value != null) (
           lib.mapAttrs (
             _: value:
+            
             (lib.findFirst (x: x.name == lib.versions.majorMinor x.name) { value = null; } (
               lib.lists.sort (x: y: lib.strings.versionOlder y.name x.name) value
             )).value
-          ) (lib.groupBy (x: lib.versions.major x.name) (lib.attrsToList packages))
+          ) (lib.groupBy (x: extractApiLevel x.value) (lib.attrsToList packages))
         );
-    in
-    {
-      platforms = mkLatestByApiLevel allArchives.packages.platforms;
-      sources = mkLatestByApiLevel allArchives.packages.sources;
-      system-images = mkLatestByApiLevel allArchives.system-images;
+    gg = {
+      platforms = mkLatestByApiLevel allArchives.packages.platforms (x: x.type-details."api-level:0");
+      sources = mkLatestByApiLevel allArchives.packages.sources (x: x.type-details."api-level:0");
+      system-images = mkLatestByApiLevel allArchives.system-images (
+        x: let
+          firstImageType = if x == {} then null else lib.head (lib.attrNames x);
+          firstImageArch = if x.${firstImageType} == {} then null else lib.head (lib.attrNames x.${firstImageType});
+        in
+        builtins.trace "first ${toString firstImageType} ${toString firstImageArch}" (
+          if firstImageType != null && firstImageArch != null then
+            builtins.trace "firstArch ${builtins.toJSON (x.${firstImageType}.${firstImageArch})}" (
+            x.${firstImageType}.${firstImageArch}.type-details."api-level:0")
+          else "<unknown>"
+        )
+      );
     };
+    in builtins.trace (builtins.toJSON gg.system-images) gg;
 
   # Lift the archives to the package level for easy search,
   # and add recurseIntoAttrs to all of them.
@@ -621,7 +628,7 @@ lib.recurseIntoAttrs rec {
           patchesInstructions = instructions;
         })
       ) systemImageTypes
-    ) platformVersions'
+    ) (builtins.trace (builtins.toJSON platformVersions') platformVersions')
   );
 
   cmake = map (
