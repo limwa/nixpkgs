@@ -7,6 +7,7 @@ pkgs.mkShell {
       lxml
       pydantic
       requests
+      returns
     ]))
   ];
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env nix-shell
-#!nix-shell -I nixpkgs=../../../.. -i python3 -p 'python3.withPackages (ps: with ps; [ beautifulsoup4 lxml pydantic requests ])'
+#!nix-shell -I nixpkgs=../../../.. -i python3 -p 'python3.withPackages (ps: with ps; [ beautifulsoup4 lxml pydantic requests returns ])'
 
 ### After making change:
 ### - Format the script by running: nix run nixpkgs#black pkgs/development/mobile/androidenv/update.py
@@ -16,18 +16,19 @@ from datetime import date
 import hashlib
 import logging
 from pathlib import Path
-from bs4.element import PageElement
+from typing import Concatenate, List
+from bs4.element import AttributeValueList, PageElement
 from typing_extensions import Annotated, Hashable, Literal, Never, NotRequired, Callable, get_args, get_origin, get_type_hints, overload, override
 import requests
 import functools
 import sys
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup, Tag
-import typing_extensions
 import pydantic
 from pydantic.dataclasses import dataclass
 from dataclasses import dataclass as pydataclass, field
-
+from returns.maybe import maybe, Some, Maybe, Nothing
+from returns.pipeline import flow
 
 ###
 ### Global variables
@@ -96,7 +97,8 @@ def traced(hide_return: bool = False):
         return wrapper
 
     return decorator
-    
+        
+        
 @traced()
 def make_session() -> requests.Session:
     """
@@ -243,7 +245,7 @@ class Archive:
 @dataclass(init=False, unsafe_hash=True)
 class Dependency:
     path: str
-    revision: str
+    revision: str | None = None
     
     def __init__(self, **kwargs): ...
 
@@ -254,8 +256,8 @@ class Package:
     kind: Literal["addon", "extra", "generic", "platform", "source", "system-image"]
     channel: str
     last_available_at: date
-    obsolete: NotRequired[bool]
-    uses_license: NotRequired[str]
+    obsolete: bool = False
+    uses_license: str | None = None
     archives: list[Archive] = field(default_factory=list)
     dependencies: list[Dependency] = field(default_factory=list)
     
@@ -331,64 +333,81 @@ class Channel:
 ### 3. Parsing of the manifests
 ###
 
+class Xml:
+    @staticmethod
+    def text(node: PageElement):
+        text = node.get_text()
+        if not text:
+            raise ValueError("Node does not have text")
+            
+        return text
+    
+    @staticmethod
+    def attribute(tag: Tag, name: str):
+        if name not in tag.attrs:
+            raise KeyError(f"Node does not have attribute {name}")
+            
+        value = tag.attrs.get(name)
+        if not isinstance(value, str):
+            raise ValueError("Attribute is not a string")
+            
+        return value
+        
+    @staticmethod
+    @maybe
+    def maybe_attribute(tag: Tag, name: str):
+        try:
+            return Xml.attribute(tag, name)
+        except KeyError:
+            return None
+
+    @staticmethod
+    def select_many(tag: Tag, css: str):
+        return tag.css.select(css)
+        
+    @staticmethod
+    @maybe
+    def select_one(tag: Tag, css: str):
+        return tag.css.select_one(css)
+
 class ManifestParser:
     def __init__(self, manifest: Manifest):
         self.manifest_url = manifest.url
         self.root = BeautifulSoup(manifest.text, "lxml-xml")
-        
-    def select_many(self, tag: Tag, selector: str) -> list[Tag]:
-        return tag.css.select(selector)
-        
-    def select_one(self, tag: Tag, selector: str) -> Tag:
-        selected = tag.css.select_one(selector)
-        if selected is None:
-            raise ValueError(f"No element found for selector {selector}")
-        
-        return selected
-        
-    def select_maybe_one(self, tag: Tag, selector: str) -> Tag | None:
-        return tag.css.select_one(selector)
-    
-    @overload
-    def extract_text(self, node: Annotated[PageElement, Trace(visible=False)]) -> str: ...
-    @overload
-    def extract_text(self, node: Annotated[None, Trace(visible=False)]) -> None: ...
-    
-    def extract_text(self, node: Annotated[PageElement | None, Trace(visible=False)]) -> str | None:
-        if node is None:
-            return None
-            
-        text = node.get_text()
-        if not text:
-            raise ValueError(f"Node {node} has no text")
-            
-        return text 
     
     @traced()
-    def parse_license(self, license_node: Annotated[BeautifulSoup, Trace(visible=False)]) -> License:
-        license_type = license_node.attrs.get("type", None)
+    def parse_license(self, license_node: Annotated[Tag, Trace(visible=False)]) -> License:
+        license_type = Xml.attribute(license_node, "type")
         assert license_type == "text", f"Only text licenses are supported, found {license_type}"
         
         return License(
             **license_node.attrs,
-            text=license_node.get_text())
-            
-    @traced()
-    def parse_channel(self, channel_node: Annotated[BeautifulSoup, Trace(visible=False)]) -> Channel:
-        return Channel(
-            **channel_node.attrs,
-            name=channel_node.get_text())
+            text=Xml.text(license_node))
         
     @traced()
-    def parse_archive(self, archive_node: Annotated[BeautifulSoup, Trace(visible=False)]) -> Archive:
-        host_os = self.extract_text(self.select_maybe_one(archive_node, "& > host-os")) or "all"
-        host_arch = self.extract_text(self.select_maybe_one(archive_node, "& > host-arch")) or "all"
-        size = int(self.extract_text(self.select_one(archive_node, "& > complete > size")))
+    def parse_licenses(self) -> set[License]:
+        return set(self.parse_license(license_node) for license_node in Xml.select_many(self.root, "license"))
+            
+    @traced()
+    def parse_channel(self, channel_node: Annotated[Tag, Trace(visible=False)]) -> Channel:
+        name = Xml.text(channel_node)
+        return Channel(
+            **channel_node.attrs,
+            name=name)
+        
+    @traced()
+    def parse_channels(self) -> set[Channel]:
+        return set(self.parse_channel(channel_node) for channel_node in Xml.select_many(self.root, "channel"))
+        
+    @traced()
+    def parse_archive(self, archive_node: Annotated[Tag, Trace(visible=False)]) -> Archive:
+        host_os = flow(archive_node, Xml.select_one("& > host-os"))
+        host_arch = Maybe.do(Xml.text(node) for node in Xml.select_one(archive_node, "& > host-arch")).value_or("all")
+        size = Maybe.do(int(Xml.text(node)) for node in Xml.select_one(archive_node, "& > complete > size")).unwrap()
         sha1 = self.extract_text(self.select_one(archive_node, '& > complete > checksum[type="sha1"]'))
         relative_url = self.extract_text(self.select_one(archive_node, "& > complete > url"))
         
         url = resolve_url_relative_to(self.manifest_url, relative_url)
-        
         return Archive(
             arch=host_arch,
             os=host_os,
@@ -397,34 +416,86 @@ class ManifestParser:
             size=size)
         
     @traced()
-    def parse_dependency(self, dependency_node: Annotated[BeautifulSoup, Trace(visible=False)]) -> Dependency:
-        pass
+    def parse_dependency(self, dependency_node: Annotated[Tag, Trace(visible=False)]) -> Dependency:
+        path = self.extract_attribute(dependency_node, "path")
+        revision = self.select_maybe_one(dependency_node, "& > min-revision")
+        if revision is not None:
+            revision = self.parse_revision(revision)
             
+        return Dependency(
+            path=path,
+            revision=revision,
+        )
+        
+    @traced()
+    def parse_revision(self, revision_node: Annotated[Tag, Trace(visible=False)]) -> str:
+        major = self.extract_text(self.select_one(revision_node, "& > major"))
+        minor = self.extract_text(self.select_maybe_one(revision_node, "& > minor"))
+        micro = self.extract_text(self.select_maybe_one(revision_node, "& > micro"))
+        preview = self.extract_text(self.select_maybe_one(revision_node, "& > preview"))
+        
+        # Converting the revision to a string must obey a few rules to ensure
+        # that sorting the resulting string is consistent with the expected
+        # ordering of the revisions in the repository.
+      
+        revision = major
+        # Minor and micro are assumed to be 0 if not present.
+        # This would be a problem if, for instance,
+        # the revision "20" is considered newer than "20.0",
+        # which doesn't seem to be the case.
+        revision += f".{minor or '0'}"
+        revision += f".{micro or '0'}"
+        # The preview number is optionally included in the revision
+        # because "20.0" is considered newer than "20.0-preview01",
+        # for instance.
+        if preview:
+            revision += f"-preview{preview}"
+            
+        return revision
+        
     @traced(hide_return=True)
-    def parse_package(self, package_node: Annotated[BeautifulSoup, Trace(visible=False)]) -> None:
-            uses_license = package_node.css.select_one("& > uses-license")
-            uses_license = None if uses_license is None else uses_license.attrs.get("ref")
+    def parse_package(self, package_node: Annotated[Tag, Trace(visible=False)]) -> Package:
+        path = self.extract_attribute(package_node, "path")
+        uses_license = self.extract_attribute(self.select_maybe_one(package_node, "& > uses-license"), "ref")
+        channel_ref = self.extract_attribute(self.select_one(package_node, "& > channelRef"), "ref")
+        channel = self.extract_text(self.select_one(self.root, f"channel[id='{channel_ref}']"))
+        revision = self.parse_revision(self.select_one(package_node, "& > revision"))
+        archives = set(self.parse_archive(archive_node) for archive_node in self.select_many(package_node, "& > archives > archive"))
+        last_available_at = date.today()
+        obsolete = self.extract_maybe_attribute(package_node, "obsolete") == "true"
+        dependencies = set(self.parse_dependency(dependency_node) for dependency_node in self.select_many(package_node, "& > dependencies > dependency"))
+        
+        return Package(
+            path=path,
+            revision=revision,
+            kind="generic",
+            channel=channel,
+            uses_license=uses_license,
+            last_available_at=last_available_at,
+            obsolete=obsolete,
+            archives=archives,
+            dependencies=dependencies,
+        )
             
             
-            
+    @traced()
+    def parse_packages(self) -> KeyedCollection[Package, Package.PackageKey]:
+        collection = KeyedCollection(Package.Keyer())
+        collection.update(self.parse_package(package_node) for package_node in self.select_many(self.root, "remotePackage"))
+        return collection
             
         
     
     @traced(hide_return=True)
-    def parse(self) -> Repository:
-        self.__parse_licenses()
-        self.__parse_channels()
-        self.__parse_packages()
-        
-        repository = Repository(self.manifest_url)
-        repository.licenses.update(self.licenses)
-        repository.packages.update(self.packages)
-        
-        return repository
+    def parse(self):
+        print(self.parse_licenses())
+        print(self.parse_channels())
+        print(self.parse_packages())
+        return
         
 
 @traced(hide_return=True)
-def parse_licenses(repository_node: Annotated[BeautifulSoup, Trace(visible=False)]):
+def parse_licenses(repository_node: Annotated[Tag, Trace(visible=False)]):
     licenses = KeyedCollection(License.LocalKeyer())
 
     
@@ -432,7 +503,7 @@ def parse_licenses(repository_node: Annotated[BeautifulSoup, Trace(visible=False
     return licenses
     
 @traced()
-def parse_channels(repository_node: Annotated[BeautifulSoup, Trace(visible=False)]):
+def parse_channels(repository_node: Annotated[Tag, Trace(visible=False)]):
     channels = KeyedCollection(Channel.LocalKeyer())
     
     for channel_node in repository_node.css.select("channel"):
@@ -445,11 +516,11 @@ def parse_channels(repository_node: Annotated[BeautifulSoup, Trace(visible=False
     return channels
     
 @traced(hide_return=True)
-def parse_packages(repository: Repository, repository_node: Annotated[BeautifulSoup, Trace(visible=False)]) -> set[Package]:
+def parse_packages(repository_node: Annotated[Tag, Trace(visible=False)]) -> set[Package]:
     pass
 
 @traced()
-def parse_repository(manifest: Manifest) -> Repository:
+def parse_repository(manifest: Manifest):
     parser = ManifestParser(manifest)
     return parser.parse()
 
@@ -572,7 +643,7 @@ def main() -> int:
         for manifest_url in args.repositories:
             manifest = fetch_manifest(session, manifest_url)
             repository = parse_repository(manifest)
-            print(manifest, repository)
+            #print(manifest, repository)
             break
 
     logger.info(
