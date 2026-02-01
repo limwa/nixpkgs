@@ -1,5 +1,5 @@
 #!/usr/bin/env nix-shell
-#!nix-shell -I nixpkgs=../../../.. -i python3 -p 'python3.withPackages (ps: with ps; [ beautifulsoup4 lxml pydantic requests returns ])'
+#!nix-shell -I nixpkgs=../../../.. -i python3 -p 'python3.withPackages (ps: with ps; [ beautifulsoup4 lxml pydantic requests ])'
 
 ### After making change:
 ### - Format the script by running: nix run nixpkgs#black pkgs/development/mobile/androidenv/update.py
@@ -8,8 +8,7 @@
 
 # pyright: basic
 
-from abc import ABC, ABCMeta, abstractmethod, abstractproperty
-import abc
+from abc import ABC, abstractmethod
 import argparse
 from collections.abc import Iterable
 from datetime import date
@@ -23,12 +22,10 @@ import requests
 import functools
 import sys
 from urllib.parse import urlparse, urljoin
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, ResultSet, Tag
 import pydantic
 from pydantic.dataclasses import dataclass
 from dataclasses import dataclass as pydataclass, field
-from returns.maybe import maybe, Some, Maybe, Nothing
-from returns.pipeline import flow
 
 ###
 ### Global variables
@@ -333,7 +330,40 @@ class Channel:
 ### 3. Parsing of the manifests
 ###
 
+
+class Process[I, O]:
+    def __init__(self, fn: Callable[[I], O | None]):
+        self.fn = fn
+        
+    def chain[J](self, fn: Callable[[O], J | None]) -> "Process[I, J]":
+        def new_fn(value: I):
+            result = self.fn(value)
+            if result is None:
+                return None
+            
+            return fn(result)
+            
+        return Process(new_fn)
+
+a = Process[Tag, Tag](lambda tag: tag)
+lol = a.chain(lambda tag: tag.attrs.get("type"))
 class Xml:
+    @staticmethod
+    def maybe_attribute(tag: Tag, name: str) -> str | None:
+        value = tag.attrs.get(name)
+        if value is None or isinstance(value, str):
+            return value
+        
+        raise ValueError(f"Attribute {name} is not a string")
+        
+    @staticmethod
+    def attribute(tag: Tag, name: str) -> str:
+        value = Xml.maybe_attribute(tag, name)
+        if value is None:
+            raise KeyError(f"Node does not have attribute {name}")
+            
+        return value
+        
     @staticmethod
     def text(node: PageElement):
         text = node.get_text()
@@ -341,35 +371,23 @@ class Xml:
             raise ValueError("Node does not have text")
             
         return text
-    
-    @staticmethod
-    def attribute(tag: Tag, name: str):
-        if name not in tag.attrs:
-            raise KeyError(f"Node does not have attribute {name}")
-            
-        value = tag.attrs.get(name)
-        if not isinstance(value, str):
-            raise ValueError("Attribute is not a string")
-            
-        return value
         
     @staticmethod
-    @maybe
-    def maybe_attribute(tag: Tag, name: str):
-        try:
-            return Xml.attribute(tag, name)
-        except KeyError:
-            return None
-
+    def maybe_select_one(tag: Tag, css: str) -> Tag | None:
+        return tag.css.select_one(css)
+        
     @staticmethod
-    def select_many(tag: Tag, css: str):
+    def select_one(tag: Tag, css: str) -> Tag:
+        result = Xml.maybe_select_one(tag, css)
+        if result is None:
+            raise ValueError(f"Node does not have a child matching {css}")
+            
+        return result
+        
+    @staticmethod
+    def select_many(tag: Tag, css: str) -> ResultSet[Tag]:
         return tag.css.select(css)
         
-    @staticmethod
-    @maybe
-    def select_one(tag: Tag, css: str):
-        return tag.css.select_one(css)
-
 class ManifestParser:
     def __init__(self, manifest: Manifest):
         self.manifest_url = manifest.url
@@ -386,7 +404,7 @@ class ManifestParser:
         
     @traced()
     def parse_licenses(self) -> set[License]:
-        return set(self.parse_license(license_node) for license_node in Xml.select_many(self.root, "license"))
+        return set(self.parse_license(license_node) for license_node in Xml.select_many(self.root, "& > license"))
             
     @traced()
     def parse_channel(self, channel_node: Annotated[Tag, Trace(visible=False)]) -> Channel:
@@ -401,11 +419,15 @@ class ManifestParser:
         
     @traced()
     def parse_archive(self, archive_node: Annotated[Tag, Trace(visible=False)]) -> Archive:
-        host_os = flow(archive_node, Xml.select_one("& > host-os"))
-        host_arch = Maybe.do(Xml.text(node) for node in Xml.select_one(archive_node, "& > host-arch")).value_or("all")
-        size = Maybe.do(int(Xml.text(node)) for node in Xml.select_one(archive_node, "& > complete > size")).unwrap()
-        sha1 = self.extract_text(self.select_one(archive_node, '& > complete > checksum[type="sha1"]'))
-        relative_url = self.extract_text(self.select_one(archive_node, "& > complete > url"))
+        host_os_node = Xml.maybe_select_one(archive_node, "& > host-os") 
+        host_os = Xml.text(host_os_node) if host_os_node is not None else None
+        
+        host_arch_node = Xml.maybe_select_one(archive_node, "& > host-arch")
+        host_arch = Xml.text(host_arch_node) if host_arch_node is not None else None
+        
+        size = int(Xml.text(Xml.select_one(archive_node, "& > complete > size")))
+        sha1 = Xml.text(Xml.select_one(archive_node, '& > complete > checksum[type="sha1"]'))
+        relative_url = Xml.text(Xml.select_one(archive_node, "& > complete > url"))
         
         url = resolve_url_relative_to(self.manifest_url, relative_url)
         return Archive(
@@ -417,8 +439,8 @@ class ManifestParser:
         
     @traced()
     def parse_dependency(self, dependency_node: Annotated[Tag, Trace(visible=False)]) -> Dependency:
-        path = self.extract_attribute(dependency_node, "path")
-        revision = self.select_maybe_one(dependency_node, "& > min-revision")
+        path = Xml.attribute(dependency_node, "path")
+        revision = Xml.maybe_select_one(dependency_node, "& > min-revision")
         if revision is not None:
             revision = self.parse_revision(revision)
             
@@ -429,10 +451,10 @@ class ManifestParser:
         
     @traced()
     def parse_revision(self, revision_node: Annotated[Tag, Trace(visible=False)]) -> str:
-        major = self.extract_text(self.select_one(revision_node, "& > major"))
-        minor = self.extract_text(self.select_maybe_one(revision_node, "& > minor"))
-        micro = self.extract_text(self.select_maybe_one(revision_node, "& > micro"))
-        preview = self.extract_text(self.select_maybe_one(revision_node, "& > preview"))
+        major = Xml.text(Xml.select_one(revision_node, "& > major"))
+        minor = map_if(Xml.maybe_select_one(revision_node, "& > minor"), Xml.text)
+        micro = map_if(Xml.maybe_select_one(revision_node, "& > micro"), Xml.text)
+        preview = map_if(Xml.maybe_select_one(revision_node, "& > preview"), Xml.text)
         
         # Converting the revision to a string must obey a few rules to ensure
         # that sorting the resulting string is consistent with the expected
@@ -455,6 +477,7 @@ class ManifestParser:
         
     @traced(hide_return=True)
     def parse_package(self, package_node: Annotated[Tag, Trace(visible=False)]) -> Package:
+        """
         path = self.extract_attribute(package_node, "path")
         uses_license = self.extract_attribute(self.select_maybe_one(package_node, "& > uses-license"), "ref")
         channel_ref = self.extract_attribute(self.select_one(package_node, "& > channelRef"), "ref")
@@ -476,13 +499,13 @@ class ManifestParser:
             archives=archives,
             dependencies=dependencies,
         )
-            
+        """    
             
     @traced()
     def parse_packages(self) -> KeyedCollection[Package, Package.PackageKey]:
-        collection = KeyedCollection(Package.Keyer())
+        """collection = KeyedCollection(Package.Keyer())
         collection.update(self.parse_package(package_node) for package_node in self.select_many(self.root, "remotePackage"))
-        return collection
+        return collection"""
             
         
     
@@ -636,6 +659,7 @@ def main() -> int:
     verbose_trace = args.verbosity >= VERBOSITY_TRACE
     verbose_debug = args.verbosity >= VERBOSITY_DEBUG
 
+    print("hi")
     if verbose_debug:
         logging.basicConfig(level=TRACE if verbose_trace else logging.DEBUG, force=True)
 
