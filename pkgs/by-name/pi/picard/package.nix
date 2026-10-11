@@ -17,14 +17,14 @@
 
 python3Packages.buildPythonApplication (finalAttrs: {
   pname = "picard";
-  version = "3.0";
+  version = "3.0.1";
   pyproject = true;
 
   src = fetchFromGitHub {
     owner = "metabrainz";
     repo = "picard";
     tag = "release-${finalAttrs.version}";
-    hash = "sha256-aUiXmiGZTg2nQtHlE8B1/DFgvK5jLVOzN8i21fPsNk4=";
+    hash = "sha256-CvL/jD+/MiYgSjbQS3nbVkL09TEZCgqGgXdDTRlCsAo=";
   };
 
   nativeBuildInputs = [
@@ -65,6 +65,7 @@ python3Packages.buildPythonApplication (finalAttrs: {
     ++ lib.optionals stdenv.hostPlatform.isDarwin [
       pyobjc-core
       pyobjc-framework-Cocoa
+      pyobjc-framework-MediaPlayer
     ]
   );
 
