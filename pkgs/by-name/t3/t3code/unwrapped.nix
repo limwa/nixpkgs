@@ -62,6 +62,20 @@ stdenv.mkDerivation (
       mkdir -p .generated/third-party-licenses/spdx/v3.28.0
       cp ${spdx-license-list-data.json}/json/details/*.json \
         .generated/third-party-licenses/spdx/v3.28.0
+    ''
+    + lib.optionalString stdenv.hostPlatform.isLinux ''
+      # The desktop app runs in packaged mode on the shared Electron, whose
+      # process.resourcesPath is its own, so point the app at ours.
+      substituteInPlace apps/desktop/src/electron/ElectronApp.ts \
+        --replace-fail 'resourcesPath: process.resourcesPath,' \
+                       "resourcesPath: \"$out/libexec/t3code-resources\","
+
+      # In packaged mode the app makes itself the default t3code:// handler
+      # (xdg-mime default) through a desktop entry whose Exec is
+      # process.execPath, which is the shared Electron binary here. Skip that,
+      # like the unpackaged app does.
+      substituteInPlace apps/desktop/src/app/DesktopLinuxUrlHandler.ts \
+        --replace-fail 'if (!environment.isPackaged) return;' 'return;'
     '';
 
     nativeBuildInputs = [
@@ -145,18 +159,28 @@ stdenv.mkDerivation (
     installPhase = ''
       runHook preInstall
 
+      desktopWrapperArgs=()
+
       mkdir --parents "$out"/libexec/t3code/apps/desktop "$out"/libexec/t3code/apps/server
       cp --recursive --no-preserve=mode node_modules "$out"/libexec/t3code
       cp --recursive --no-preserve=mode apps/server/{node_modules,dist} "$out"/libexec/t3code/apps/server
       cp --recursive --no-preserve=mode \
-        apps/desktop/{node_modules,dist-electron} \
+        apps/desktop/{node_modules,dist-electron,package.json} \
         "$out"/libexec/t3code/apps/desktop
 
+      # Electron runs on libexec/t3code, which is laid out like upstream's
+      # app.asar, so give it the runtime fields of the package.json that
+      # upstream stages there (scripts/build-desktop-artifact.ts).
       # Electron derives the app name, and with it the safeStorage keyring /
-      # Keychain identity, from `productName` or `name`. Use `t3code` like the
-      # official builds so encrypted data stays readable across rebrands.
-      jq '.name = "t3code" | del(.productName)' apps/desktop/package.json \
-        > "$out"/libexec/t3code/apps/desktop/package.json
+      # Keychain identity, from `productName` or `name`. Use `t3code` without
+      # a `productName` like the official builds so encrypted data stays
+      # readable across rebrands.
+      jq --null-input --arg version ${finalAttrs.version} '{
+        name: "t3code",
+        version: $version,
+        private: true,
+        main: "apps/desktop/dist-electron/boot.cjs"
+      }' > "$out"/libexec/t3code/package.json
 
       mkdir --parents "$out"/libexec/t3code/apps/desktop/prod-resources
       install --mode=444 ${desktopIcon} \
@@ -165,7 +189,12 @@ stdenv.mkDerivation (
     + lib.optionalString stdenv.hostPlatform.isLinux ''
       install -Dm755 \
         native/browser-secret/build/${stdenv.hostPlatform.node.arch}/t3-browser-secret \
-        "$out"/libexec/t3code/apps/desktop/prod-resources/browser-secret/t3-browser-secret
+        "$out"/libexec/t3code-resources/browser-secret/t3-browser-secret
+
+      # Run in Electron's packaged mode like the official builds.
+      desktopWrapperArgs+=(
+        --set ELECTRON_FORCE_IS_PACKAGED true
+      )
     ''
     + ''
 
@@ -175,8 +204,9 @@ stdenv.mkDerivation (
         --add-flags "$out"/libexec/t3code/apps/server/dist/bin.mjs
 
       makeWrapper ${lib.getExe electron} "$out"/bin/t3code-desktop \
-        --add-flags "$out"/libexec/t3code/apps/desktop \
-        --inherit-argv0
+        --add-flags "$out"/libexec/t3code \
+        --inherit-argv0 \
+        "''${desktopWrapperArgs[@]}"
     ''
     + lib.optionalString stdenv.hostPlatform.isDarwin ''
       # node-pty tries to chmod this helper at runtime, but the Nix store is
